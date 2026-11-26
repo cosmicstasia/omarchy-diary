@@ -1,0 +1,23 @@
+{
+  "tooltip.write": "Diary — click to write today's entry",
+  "tooltip.today": {
+    "one": "Diary — %1 word today",
+    "other": "Diary — %1 words today"
+  },
+  "panel.today": "Today",
+  "panel.yesterday": "Yesterday",
+  "panel.earlier": "Earlier",
+  "panel.nothingYet": "Not written yet",
+  "panel.words": {
+    "one": "%1 word",
+    "other": "%1 words"
+  },
+  "panel.hint": "↑↓ move · Enter open · T today · O folder · R reload",
+  "panel.openFailed": "Could not open the entry",
+  "panel.folderFailed": "Could not open the folder",
+  "panel.empty": "No entries yet",
+  "panel.entries": {
+    "one": "%1 entry",
+    "other": "%1 entries"
+  }
+}

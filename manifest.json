@@ -1,0 +1,63 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.cosmicstasia.diary",
+  "name": "Diary",
+  "version": "1.0.0",
+  "author": "cosmicstasia",
+  "license": "MIT",
+  "description": "Write a dated diary entry in your Documents folder, autosaved by your writing app.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "BarWidget.qml"
+  },
+  "barWidget": {
+    "displayName": "Diary",
+    "description": "One click opens today's entry; right click browses the last few weeks.",
+    "category": "Writing",
+    "allowMultiple": false,
+    "defaultSection": "left",
+    "defaults": {
+      "directory": "~/Documents/Diary",
+      "editor": "auto",
+      "header": "# %1",
+      "recentCount": 14
+    },
+    "schema": [
+      {
+        "key": "directory",
+        "type": "string",
+        "label": "Entry folder",
+        "defaultValue": "~/Documents/Diary"
+      },
+      {
+        "key": "editor",
+        "type": "string",
+        "label": "Editor",
+        "options": [
+          "auto",
+          "omawrite",
+          "default"
+        ],
+        "defaultValue": "auto"
+      },
+      {
+        "key": "header",
+        "type": "string",
+        "label": "New entry heading",
+        "description": "%1 is replaced with the date. Leave empty for a blank page.",
+        "defaultValue": "# %1"
+      },
+      {
+        "key": "recentCount",
+        "type": "integer",
+        "label": "Entries listed",
+        "min": 3,
+        "max": 60,
+        "step": 1,
+        "defaultValue": 14
+      }
+    ]
+  }
+}

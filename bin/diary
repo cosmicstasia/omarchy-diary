@@ -1,0 +1,212 @@
+#!/usr/bin/env bash
+# shellcheck shell=bash
+#
+# diary: the filesystem side of the Omarchy diary bar widget.
+#
+# Nothing here is interactive. The widget calls these subcommands and reads
+# what they print, which keeps every path decision and every word count in one
+# place instead of spread through QML, and lets this file be tested on its own
+# (test/run-tests.sh).
+#
+#   diary path [KEY]           absolute path of one entry, created or not
+#   diary folder               the diary folder, created if missing
+#   diary ensure [KEY] [HEAD]  create the entry if absent, print its path
+#   diary stats [KEY]          "<words>\t<first line>" for one entry
+#   diary list [LIMIT] [SKIP]  entries newest first, same two columns, SKIP left out
+#
+# KEY is YYYY-MM-DD and defaults to today. DIARY_DIR overrides the folder
+# (default ~/Documents/Diary); a leading ~ or a relative path is expanded
+# against $HOME, the same way Diary.resolveDirectory does it in QML.
+
+set -uo pipefail
+
+DATE_KEY_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
+
+fail() {
+  printf 'diary: %s\n' "$*" >&2
+  exit 1
+}
+
+usage() {
+  cat <<'USAGE'
+diary path [KEY]           absolute path of one entry, created or not
+diary folder               the diary folder, created if missing
+diary ensure [KEY] [HEAD]  create the entry if absent, print its path
+diary stats [KEY]          "<words>\t<first line>" for one entry
+diary list [LIMIT] [SKIP]  entries newest first, same two columns, SKIP left out
+
+KEY is YYYY-MM-DD and defaults to today.
+DIARY_DIR overrides the folder (default ~/Documents/Diary).
+USAGE
+}
+
+today_key() { date +%Y-%m-%d; }
+
+diary_dir() {
+  local dir="${DIARY_DIR:-}"
+  [[ -n $dir ]] || dir='~/Documents/Diary'
+
+  case $dir in
+  '~') dir=$HOME ;;
+  '~/'*) dir="$HOME/${dir#'~/'}" ;;
+  esac
+
+  [[ $dir == /* ]] || dir="$HOME/$dir"
+  while [[ $dir == */ && $dir != / ]]; do dir=${dir%/}; done
+  printf '%s\n' "$dir"
+}
+
+validate_key() {
+  [[ $1 =~ $DATE_KEY_RE ]] || fail "invalid date key: $1"
+  # 2026-02-31 has the right shape and is not a day: the calendar decides, not
+  # the pattern. GNU date normalises it to 2026-03-03, so a round trip that
+  # comes back different means the date never existed.
+  local roundtrip
+  roundtrip=$(date -d "$1" +%Y-%m-%d 2>/dev/null) || fail "invalid date key: $1"
+  [[ $roundtrip == "$1" ]] || fail "invalid date key: $1"
+}
+
+entry_path() {
+  local key=$1
+  validate_key "$key"
+  printf '%s/%s.md\n' "$(diary_dir)" "$key"
+}
+
+# Marks the start of what the author actually wrote. `ensure` writes a heading
+# followed by a blank line, so a file in that shape starts at line 3: the
+# heading is furniture this widget put there, and counting it as words would
+# report every untouched entry as four words long. Any other file counts whole.
+body_start_rule='
+  { line[NR] = $0 }
+  END {
+    start = 1
+    if (NR >= 2 && line[1] ~ /^# / && line[2] == "") start = 3
+    for (i = start; i <= NR; i++) print line[i]
+    exit
+  }
+'
+
+body_words() {
+  local file=$1 count
+  count=$(
+    awk "$body_start_rule" "$file" |
+      tr -s '[:space:]' '\n' |
+      grep -c '[^[:space:]]'
+  ) || count=0
+  printf '%s\n' "${count:-0}"
+}
+
+# The first line the author wrote, with the markdown markers a one-line panel
+# row has no room to render. Tabs and newlines fold to spaces so the result is
+# always exactly one TSV field, whatever the file holds.
+body_first_line() {
+  local file=$1 text
+  text=$(
+    awk "$body_start_rule" "$file" |
+      awk '/[^[:space:]]/ { print; exit }'
+  ) || text=""
+
+  printf '%s' "$text" |
+    tr '\t\r\n' '   ' |
+    sed -e 's/^[[:space:]]*//' \
+      -e 's/^[#>*_~`-][#>*_~` -]*//' \
+      -e 's/\*\*//g' \
+      -e 's/__//g' \
+      -e 's/[[:space:]]\{1,\}/ /g' \
+      -e 's/[[:space:]]*$//' |
+    tr -d '[:cntrl:]'
+}
+
+cmd_path() {
+  entry_path "${1:-$(today_key)}"
+}
+
+cmd_folder() {
+  local dir
+  dir=$(diary_dir)
+  mkdir -p -- "$dir" || fail "cannot create $dir"
+  printf '%s\n' "$dir"
+}
+
+cmd_ensure() {
+  local key="${1:-$(today_key)}" header="${2-}" dir file body=""
+
+  validate_key "$key"
+  dir=$(diary_dir)
+  file="$dir/$key.md"
+
+  if [[ -n $header ]]; then
+    # One line only. This becomes a markdown heading in a plain text file, and
+    # a newline smuggled into it would push the rest of the template into the
+    # author's first line.
+    header=${header//$'\r'/ }
+    header=${header//$'\n'/ }
+    body="$header"$'\n\n'
+  fi
+  # Never a zero-byte file: the writing app treats a file it has not read
+  # content from as one that needs an explicit save, so an empty file would
+  # quietly disable autosaving for that entry.
+  [[ -n $body ]] || body=$'\n'
+
+  if [[ ! -e $file ]]; then
+    mkdir -p -- "$dir" || fail "cannot create $dir"
+    # noclobber, so an entry that appeared between the test above and this
+    # write is never truncated: whatever is already there is worth more than
+    # the template.
+    (set -o noclobber; printf '%s' "$body" >"$file") 2>/dev/null || true
+  elif [[ ! -s $file ]]; then
+    printf '%s' "$body" >"$file" 2>/dev/null || true
+  fi
+
+  [[ -f $file ]] || fail "cannot write $file"
+  printf '%s\n' "$file"
+}
+
+cmd_stats() {
+  local key="${1:-$(today_key)}" file
+  file=$(entry_path "$key") || exit 1
+  if [[ -f $file ]]; then
+    printf '%s\t%s\n' "$(body_words "$file")" "$(body_first_line "$file")"
+  else
+    printf '0\t\n'
+  fi
+}
+
+cmd_list() {
+  local limit="${1:-14}" skip="${2:-}" dir name file key
+
+  [[ $limit =~ ^[0-9]+$ ]] || fail "invalid limit: $limit"
+  ((limit >= 1 && limit <= 200)) || fail "limit out of range: $limit"
+  if [[ -n $skip ]]; then validate_key "$skip"; fi
+
+  dir=$(diary_dir)
+  [[ -d $dir ]] || return 0
+
+  # ISO dates sort as text, so the newest entries come first with no date
+  # arithmetic on this side.
+  while IFS= read -r name; do
+    key=${name%.md}
+    # Skipped after the sort rather than inside it: the widget asks for "the
+    # last N entries besides today", and today already has its own row.
+    [[ -n $skip && $key == "$skip" ]] && continue
+    file="$dir/$name"
+    printf '%s\t%s\t%s\n' "$key" "$(body_words "$file")" "$(body_first_line "$file")"
+  done < <(
+    find "$dir" -mindepth 1 -maxdepth 1 -type f \
+      -name '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9].md' -printf '%f\n' |
+      sort -r | head -n "$limit"
+  )
+}
+
+command="${1:-}"
+[[ $# -gt 0 ]] && shift
+
+case "$command" in
+path) cmd_path "$@" ;;
+folder) cmd_folder "$@" ;;
+ensure) cmd_ensure "$@" ;;
+stats) cmd_stats "$@" ;;
+list) cmd_list "$@" ;;
+-h | --help | help | "") usage ;;
+*) fail "unknown command: $command (try --help)" ;;
+esac
