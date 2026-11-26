@@ -148,16 +148,33 @@ cmd_ensure() {
   # quietly disable autosaving for that entry.
   [[ -n $body ]] || body=$'\n'
 
+  mkdir -p -- "$dir" 2>/dev/null || fail "cannot create $dir"
+
+  # A symlink planted in the folder must never decide where an entry's text
+  # lands: `>` follows it, so another local account with write access to the
+  # directory could aim today's entry at a file of its choosing. Unlink it
+  # first -- rm removes the link itself and never its target -- so what is
+  # written below can only be a new file in this folder.
+  [[ -L $file ]] && rm -f -- "$file"
+
   if [[ ! -e $file ]]; then
-    mkdir -p -- "$dir" || fail "cannot create $dir"
     # noclobber, so an entry that appeared between the test above and this
     # write is never truncated: whatever is already there is worth more than
     # the template.
     (set -o noclobber; printf '%s' "$body" >"$file") 2>/dev/null || true
-  elif [[ ! -s $file ]]; then
-    printf '%s' "$body" >"$file" 2>/dev/null || true
+  elif [[ -f $file && ! -s $file ]]; then
+    # An empty entry has to get content, or the writing app will not autosave
+    # it. Unlink and create rather than truncate in place, for the same reason
+    # as above: only creating a new file is guaranteed not to write through
+    # whatever the path pointed at.
+    rm -f -- "$file"
+    (set -o noclobber; printf '%s' "$body" >"$file") 2>/dev/null || true
   fi
 
+  # Last word on it, after the race the writes above cannot lose: a link that
+  # is still there is not an entry, and handing its path to the editor would
+  # let the editor's autosaves run through it.
+  [[ ! -L $file ]] || fail "refusing to use a symlinked entry: $file"
   [[ -f $file ]] || fail "cannot write $file"
   printf '%s\n' "$file"
 }
@@ -165,7 +182,7 @@ cmd_ensure() {
 cmd_stats() {
   local key="${1:-$(today_key)}" file
   file=$(entry_path "$key") || exit 1
-  if [[ -f $file ]]; then
+  if [[ -f $file && ! -L $file ]]; then
     printf '%s\t%s\n' "$(body_words "$file")" "$(body_first_line "$file")"
   else
     printf '0\t\n'

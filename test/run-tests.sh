@@ -148,6 +148,53 @@ check "$([ $? -ne 0 ] && echo 0 || echo 1)" "a path is refused where a date key 
 check "$([ $? -ne 0 ] && echo 0 || echo 1)" "stats refuses a malformed key"
 check "$([ ! -e "$WORK/diary/../../etc/passwd.md" ] && echo 0 || echo 1)" "nothing was written outside the folder"
 
+# ------------------------------------------------------------------ symlinks
+
+section "symlink safety"
+
+# Another local account with write access to the folder can plant an entry name
+# as a symlink. Writing then has to land in a file in this folder, never in
+# whatever the link points at -- and reading must not follow one either.
+reset_diary
+target="$WORK/innocent.txt"
+: >"$target"
+ln -s "$target" "$WORK/diary/2026-06-01.md"
+path=$("$CLI" ensure 2026-06-01 "# Monday, 1 June 2026")
+check "$([ "$path" = "$WORK/diary/2026-06-01.md" ] && echo 0 || echo 1)" \
+  "ensure answers with the entry path even over a planted symlink"
+check "$([ -f "$WORK/diary/2026-06-01.md" ] && [ ! -L "$WORK/diary/2026-06-01.md" ] && echo 0 || echo 1)" \
+  "the entry is a plain file afterwards, not a link"
+check "$([ -s "$target" ] && echo 1 || echo 0)" \
+  "nothing was written through the link to its target"
+check "$([ -s "$WORK/diary/2026-06-01.md" ] && echo 0 || echo 1)" \
+  "the entry itself still got its heading"
+
+reset_diary
+printf 'keep me\n' >"$WORK/keep.txt"
+ln -s "$WORK/keep.txt" "$WORK/diary/2026-06-02.md"
+"$CLI" ensure 2026-06-02 "# Tuesday, 2 June 2026" >/dev/null
+check "$([ "$(cat "$WORK/keep.txt")" = "keep me" ] && echo 0 || echo 1)" \
+  "a file behind a planted link keeps its content"
+
+reset_diary
+mkdir -p "$WORK/linked-dir"
+ln -s "$WORK/linked-dir" "$WORK/diary/2026-06-03.md"
+"$CLI" ensure 2026-06-03 "# Wednesday, 3 June 2026" >/dev/null 2>&1
+check "$([ -f "$WORK/diary/2026-06-03.md" ] && [ ! -L "$WORK/diary/2026-06-03.md" ] && echo 0 || echo 1)" \
+  "a link to a directory is replaced by a plain entry"
+check "$([ -z "$(ls -A "$WORK/linked-dir")" ] && echo 0 || echo 1)" \
+  "nothing was written into the linked directory"
+
+reset_diary
+printf 'a secret first line\n' >"$WORK/secret.txt"
+ln -s "$WORK/secret.txt" "$WORK/diary/2026-06-04.md"
+check "$([ "$("$CLI" stats 2026-06-04 | cut -f1)" = "0" ] && echo 0 || echo 1)" \
+  "stats does not count words in a file behind a link"
+check "$([[ $("$CLI" stats 2026-06-04) != *secret* ]] && echo 0 || echo 1)" \
+  "stats does not read the linked file into the panel"
+check "$([ -z "$("$CLI" list 10)" ] && echo 0 || echo 1)" \
+  "a symlinked entry is not offered by the listing"
+
 section "excerpts"
 
 reset_diary

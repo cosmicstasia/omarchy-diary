@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.cosmicstasia.diary",
   "name": "Diary",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "author": "cosmicstasia",
   "license": "MIT",
   "description": "Write a dated diary entry in your Documents folder, autosaved by your writing app.",
