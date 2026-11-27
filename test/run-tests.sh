@@ -9,8 +9,10 @@
 # discover later: that the heading the widget writes is not counted as the
 # writer's words, that an existing entry is never truncated, that a stray file
 # in the folder is not an entry, that the excerpt never carries a tab or a
-# newline into a TSV row, and that the two implementations of the folder rules
-# (bin/diary and Diary.js) agree.
+# newline into a TSV row, that a folder other accounts can write to is refused
+# before any entry is touched, that a link planted mid-write is never written
+# through, and that the two implementations of the folder rules (bin/diary and
+# Diary.js) agree.
 #
 #   test/run-tests.sh
 
@@ -194,6 +196,158 @@ check "$([[ $("$CLI" stats 2026-06-04) != *secret* ]] && echo 0 || echo 1)" \
   "stats does not read the linked file into the panel"
 check "$([ -z "$("$CLI" list 10)" ] && echo 0 || echo 1)" \
   "a symlinked entry is not offered by the listing"
+
+# ------------------------------------------------------------- private folder
+
+section "private folder"
+
+# Checking an entry cannot protect the editor: it opens the path after the
+# helper has exited, so an account that can rename names in the folder could
+# swap the entry for a symlink in between. bin/diary therefore refuses (exit 3)
+# any folder another account could write to, before touching an entry.
+
+expect_refused() {
+  local what=$1 status
+  shift
+  "$@" >"$WORK/out" 2>"$WORK/err"
+  status=$?
+  check "$([ "$status" = "3" ] && echo 0 || echo 1)" "$what (exit $status)"
+}
+
+for perm in g+w o+w; do
+  reset_diary
+  printf 'kept\n' >"$WORK/diary/2026-07-01.md"
+  chmod "$perm" "$WORK/diary"
+  expect_refused "ensure refuses a folder with $perm" "$CLI" ensure 2026-07-02 "# heading"
+  check "$([ ! -e "$WORK/diary/2026-07-02.md" ] && echo 0 || echo 1)" \
+    "nothing is created in a folder with $perm"
+  check "$([ ! -s "$WORK/out" ] && echo 0 || echo 1)" "no path is handed to the editor for a folder with $perm"
+  expect_refused "stats refuses a folder with $perm" "$CLI" stats 2026-07-01
+  check "$([[ $(cat "$WORK/out") != *kept* ]] && echo 0 || echo 1)" "stats reads nothing from a folder with $perm"
+  expect_refused "list refuses a folder with $perm" "$CLI" list 10
+  check "$([ ! -s "$WORK/out" ] && echo 0 || echo 1)" "list reads nothing from a folder with $perm"
+  chmod go-w "$WORK/diary"
+done
+
+reset_diary
+chmod 1777 "$WORK/diary"
+expect_refused "a sticky, world-writable folder is still refused" "$CLI" ensure 2026-07-03 "# heading"
+
+reset_diary
+mkdir -p "$WORK/shared"
+chmod 0777 "$WORK/shared"
+mkdir -p "$WORK/shared/diary"
+chmod 0700 "$WORK/shared/diary"
+expect_refused "a private folder inside a writable, non-sticky parent is refused" \
+  env DIARY_DIR="$WORK/shared/diary" "$CLI" ensure 2026-07-04 "# heading"
+chmod 1777 "$WORK/shared"
+out=$(DIARY_DIR="$WORK/shared/diary" "$CLI" ensure 2026-07-04 "# heading" 2>/dev/null)
+check "$([ "$out" = "$WORK/shared/diary/2026-07-04.md" ] && echo 0 || echo 1)" \
+  "a private folder inside a sticky parent, like /tmp, is accepted"
+rm -rf -- "$WORK/shared"
+
+reset_diary
+mkdir -p "$WORK/open"
+chmod 0777 "$WORK/open"
+ln -s "$WORK/open" "$WORK/diary/link"
+expect_refused "a folder that is a symlink to a writable directory is refused" \
+  env DIARY_DIR="$WORK/diary/link" "$CLI" ensure 2026-07-05 "# heading"
+check "$([ -z "$(ls -A "$WORK/open")" ] && echo 0 || echo 1)" "nothing is created behind that link"
+chmod 0700 "$WORK/open"
+out=$(DIARY_DIR="$WORK/diary/link" "$CLI" ensure 2026-07-05 "# heading" 2>/dev/null)
+check "$([ "$out" = "$WORK/open/2026-07-05.md" ] && echo 0 || echo 1)" \
+  "a symlink to a private folder works, and the resolved path is what gets opened"
+rm -rf -- "$WORK/open"
+
+if command -v setfacl >/dev/null 2>&1 && reset_diary && chmod 0700 "$WORK/diary" &&
+  setfacl -m u:nobody:rwx "$WORK/diary" 2>/dev/null; then
+  expect_refused "a folder another user can write to through an ACL is refused" \
+    "$CLI" ensure 2026-07-06 "# heading"
+  setfacl -m u:nobody:rx "$WORK/diary"
+  out=$("$CLI" ensure 2026-07-06 "# heading" 2>/dev/null)
+  check "$([ -n "$out" ] && echo 0 || echo 1)" "a read-only ACL entry is not refused"
+  setfacl -b "$WORK/diary"
+else
+  skip "ACL cases (setfacl unavailable or unsupported here)"
+fi
+
+rm -rf -- "$WORK/diary"
+(umask 000 && "$CLI" ensure 2026-07-07 "# heading" >/dev/null)
+check "$([ "$(stat -c %a "$WORK/diary")" = "700" ] && echo 0 || echo 1)" \
+  "a folder ensure creates is 0700 even under umask 000"
+rm -rf -- "$WORK/diary"
+(umask 000 && DIARY_DIR="$WORK/new/nested/diary" "$CLI" ensure 2026-07-07 "# heading" >/dev/null)
+check "$([ "$(stat -c %a "$WORK/new")" = "700" ] && [ "$(stat -c %a "$WORK/new/nested/diary")" = "700" ] && echo 0 || echo 1)" \
+  "so are the parents it has to create"
+rm -rf -- "$WORK/new"
+
+reset_diary
+"$CLI" ensure 2026-07-08 "# heading" >/dev/null
+check "$([ $? -eq 0 ] && echo 0 || echo 1)" "the default private folder still just works"
+
+# ---------------------------------------------------------- the race window
+
+section "a link planted in the race window"
+
+# Deterministic, not a timing loop: a `mktemp` shim on PATH runs at the exact
+# point inside ensure that is after every check on the entry and before the
+# entry is created, and plants a symlink there -- what a concurrent attacker
+# would have to win. (Once the folder is private nobody else can do this; the
+# property tested is that even then the write cannot go through the link.)
+SHIMS="$WORK/shims"
+mkdir -p "$SHIMS"
+cat >"$SHIMS/mktemp" <<'SHIM'
+#!/usr/bin/env bash
+for arg; do :; done
+ln -sfn -- "$RACE_TARGET" "${arg%.XXXXXX}"
+PATH=${PATH#*:} exec mktemp "$@"
+SHIM
+chmod +x "$SHIMS/mktemp"
+
+race() { PATH="$SHIMS:$PATH" RACE_TARGET=$1 "$CLI" ensure "$2" "# heading" >"$WORK/out" 2>/dev/null; }
+
+reset_diary
+: >"$WORK/victim-empty"
+race "$WORK/victim-empty" 2026-08-01
+status=$?
+check "$([ ! -s "$WORK/victim-empty" ] && echo 0 || echo 1)" "a link to an empty file planted mid-ensure is not written through"
+check "$([ "$status" -ne 0 ] && [ ! -s "$WORK/out" ] && echo 0 || echo 1)" \
+  "ensure then fails and prints no path, so the editor never opens the link"
+
+reset_diary
+printf 'keep me\n' >"$WORK/victim-full"
+race "$WORK/victim-full" 2026-08-02
+check "$([ "$(cat "$WORK/victim-full")" = "keep me" ] && echo 0 || echo 1)" \
+  "a link to a file with content planted mid-ensure leaves it untouched"
+
+reset_diary
+printf 'x\n' >"$WORK/diary/2026-08-03.md"
+: >"$WORK/diary/2026-08-03.md"
+race "$WORK/victim-empty" 2026-08-03
+check "$([ ! -s "$WORK/victim-empty" ] && echo 0 || echo 1)" \
+  "the zero-byte refill path cannot be redirected mid-ensure either"
+
+reset_diary
+mkfifo "$WORK/victim-fifo"
+timeout 5 env PATH="$SHIMS:$PATH" RACE_TARGET="$WORK/victim-fifo" "$CLI" ensure 2026-08-04 "# heading" >/dev/null 2>&1
+status=$?
+check "$([ "$status" -ne 124 ] && echo 0 || echo 1)" \
+  "a link to a FIFO planted mid-ensure is never opened (noclobber alone would block on it)"
+
+check "$([ -z "$(find "$WORK/diary" -name '*.XXXXXX' -o -name '*.md.*')" ] && echo 0 || echo 1)" \
+  "no temporary files are left behind in the folder"
+
+# No hard links (exFAT and the like): ensure still creates the entry.
+cat >"$SHIMS/ln" <<'SHIM'
+#!/usr/bin/env bash
+exit 1
+SHIM
+chmod +x "$SHIMS/ln"
+rm -f "$SHIMS/mktemp"
+reset_diary
+out=$(PATH="$SHIMS:$PATH" "$CLI" ensure 2026-08-05 "# heading" 2>/dev/null)
+check "$([ -n "$out" ] && [ -s "$out" ] && echo 0 || echo 1)" "on a filesystem without hard links, ensure still writes the entry"
+rm -rf -- "$SHIMS"
 
 section "excerpts"
 

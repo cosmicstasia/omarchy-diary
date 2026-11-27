@@ -15,6 +15,7 @@
   "panel.hint": "↑↓ move · Enter open · T today · O folder · R reload",
   "panel.openFailed": "Could not open the entry",
   "panel.folderFailed": "Could not open the folder",
+  "panel.unsafeFolder": "Diary folder is writable by other users — run chmod go-w on it",
   "panel.empty": "No entries yet",
   "panel.entries": {
     "one": "%1 entry",

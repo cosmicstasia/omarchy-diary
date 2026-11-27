@@ -17,6 +17,9 @@
 # KEY is YYYY-MM-DD and defaults to today. DIARY_DIR overrides the folder
 # (default ~/Documents/Diary); a leading ~ or a relative path is expanded
 # against $HOME, the same way Diary.resolveDirectory does it in QML.
+#
+# ensure, stats and list exit 3, before touching any entry, when the folder
+# is not private (see private_dir). Any other failure exits 1.
 
 set -uo pipefail
 
@@ -25,6 +28,11 @@ DATE_KEY_RE='^[0-9]{4}-[0-9]{2}-[0-9]{2}$'
 fail() {
   printf 'diary: %s\n' "$*" >&2
   exit 1
+}
+
+refuse() {
+  printf 'diary: %s\n' "$*" >&2
+  exit 3
 }
 
 usage() {
@@ -54,6 +62,116 @@ diary_dir() {
   [[ $dir == /* ]] || dir="$HOME/$dir"
   while [[ $dir == */ && $dir != / ]]; do dir=${dir%/}; done
   printf '%s\n' "$dir"
+}
+
+# The folder an entry is handed out of has to be one nobody else can change.
+#
+# A check on the entry itself cannot be enough. The editor is launched after
+# this script exits, by pathname, so whoever can create or rename names in the
+# folder can swap the entry for a symlink after any check made here and before
+# the editor opens (and autosaves) it. stats and list have the same gap: they
+# check a name and then reopen it. The gap closes only if no other account can
+# change any name the path goes through, so that is checked before an entry is
+# touched, and the folder is refused otherwise.
+#
+# The path is resolved here one component at a time, the way the kernel does
+# it, following each symlink in turn, so that every directory a lookup of an
+# entry would pass through is seen -- including the ones inside a symlink's
+# target, which the logical path never names. Each must be:
+#
+#   - owned by this user or by root, since an owner can always chmod;
+#   - without group or other write permission. On Linux this covers POSIX
+#     ACLs too: with an ACL present the group bits of the mode are the ACL
+#     mask, which caps every named user and group entry, so any ACL that lets
+#     another account write shows up as g+w;
+#   - with one exception: a sticky directory above the folder, like /tmp, is
+#     fine, because there only the owner of a name can rename or remove it
+#     and the owner is checked. The folder itself gets no such exception:
+#     sticky or not, others could still create today's entry before we do.
+#
+# A symlink passed through must also belong to this user or root, which is
+# what matters when it sits in a sticky directory.
+#
+# Prints the resolved, symlink-free folder -- the path every later step must
+# use -- or exits 3 (or 1 when the folder cannot be resolved at all).
+private_dir() {
+  local dir=$1 cur=/ comp next target owner mode name hops=0
+  local -a queue more dirs=(/)
+
+  IFS=/ read -r -d '' -a queue < <(printf '%s' "$dir")
+  while ((${#queue[@]})); do
+    comp=${queue[0]}
+    queue=("${queue[@]:1}")
+    case $comp in
+    '' | .) continue ;;
+    ..)
+      cur=${cur%/*}
+      [[ -n $cur ]] || cur=/
+      continue
+      ;;
+    esac
+
+    next="${cur%/}/$comp"
+    if [[ -L $next ]]; then
+      ((++hops <= 40)) || fail "too many symlinks in $dir"
+      owner=$(stat -c %u -- "$next") || fail "cannot inspect $next"
+      [[ $owner == "$EUID" || $owner == 0 ]] ||
+        refuse "refusing $dir: $next is a symlink owned by another user"
+      target=$(readlink -- "$next") || fail "cannot read $next"
+      [[ $target == /* ]] && cur=/
+      IFS=/ read -r -d '' -a more < <(printf '%s' "$target")
+      queue=("${more[@]}" "${queue[@]}")
+      continue
+    fi
+
+    [[ -d $next ]] || fail "not a directory: $next"
+    cur=$next
+    dirs+=("$cur")
+  done
+
+  while IFS=' ' read -r -d '' owner mode name; do
+    [[ $owner == "$EUID" || $owner == 0 ]] ||
+      refuse "refusing $dir: $name is owned by another user"
+    mode=$((8#$mode))
+    ((mode & 8#022)) || continue
+    [[ $name != "$cur" ]] && ((mode & 8#1000)) && continue
+    refuse "refusing $dir: $name is writable by other users (chmod go-w '$name')"
+  done < <(printf '%s\0' "${dirs[@]}" | sort -zu | xargs -0 stat --printf '%u %a %n\0' --)
+
+  printf '%s\n' "$cur"
+}
+
+# A diary is private: every directory this creates, the folder and any parent
+# it needs, is 0700 whatever the umask, so a fresh setup always passes
+# private_dir. Existing directories are left as they are.
+make_dir() {
+  (umask 077 && mkdir -p -- "$1")
+}
+
+# Puts BODY at FILE only if nothing is there, without ever opening FILE.
+#
+# The text goes into a fresh mktemp file first (O_EXCL, mode 0600), which is
+# then hard-linked into place. link() never follows a symlink at the
+# destination and fails if any name is already there, so an entry that
+# appeared in the meantime is never truncated and a link planted in the window
+# is never written through. (Bash's noclobber is not enough on its own: it
+# still opens an existing non-regular file, so a link to a FIFO or a device
+# would be written to.) Failure is quiet; the caller checks what is there.
+#
+# Only a filesystem without hard links (exFAT on a USB stick, say) falls back
+# to a noclobber write, and only while nothing at all is at FILE.
+create_entry() {
+  local file=$1 body=$2 tmp status=1
+  tmp=$(mktemp -- "$file.XXXXXX" 2>/dev/null) || return 1
+  if printf '%s' "$body" >"$tmp"; then
+    if ln -T -- "$tmp" "$file" 2>/dev/null; then
+      status=0
+    elif [[ ! -e $file && ! -L $file ]]; then
+      (set -o noclobber; printf '%s' "$body" >"$file") 2>/dev/null && status=0
+    fi
+  fi
+  rm -f -- "$tmp"
+  return "$status"
 }
 
 validate_key() {
@@ -124,7 +242,7 @@ cmd_path() {
 cmd_folder() {
   local dir
   dir=$(diary_dir)
-  mkdir -p -- "$dir" || fail "cannot create $dir"
+  make_dir "$dir" || fail "cannot create $dir"
   printf '%s\n' "$dir"
 }
 
@@ -133,7 +251,6 @@ cmd_ensure() {
 
   validate_key "$key"
   dir=$(diary_dir)
-  file="$dir/$key.md"
 
   if [[ -n $header ]]; then
     # One line only. This becomes a markdown heading in a plain text file, and
@@ -148,27 +265,26 @@ cmd_ensure() {
   # quietly disable autosaving for that entry.
   [[ -n $body ]] || body=$'\n'
 
-  mkdir -p -- "$dir" 2>/dev/null || fail "cannot create $dir"
+  make_dir "$dir" 2>/dev/null || fail "cannot create $dir"
+  # Nothing below runs unless the folder is private; from here on nobody else
+  # can create, rename or replace an entry, so the path printed at the end
+  # stays the file this script checked until the editor is done with it.
+  dir=$(private_dir "$dir") || exit
+  file="$dir/$key.md"
 
-  # A symlink planted in the folder must never decide where an entry's text
-  # lands: `>` follows it, so another local account with write access to the
-  # directory could aim today's entry at a file of its choosing. Unlink it
-  # first -- rm removes the link itself and never its target -- so what is
-  # written below can only be a new file in this folder.
+  # Belt and braces, now that only this user can plant anything here: a
+  # symlink must never decide where an entry's text lands. Unlink it first --
+  # rm removes the link itself and never its target.
   [[ -L $file ]] && rm -f -- "$file"
 
   if [[ ! -e $file ]]; then
-    # noclobber, so an entry that appeared between the test above and this
-    # write is never truncated: whatever is already there is worth more than
-    # the template.
-    (set -o noclobber; printf '%s' "$body" >"$file") 2>/dev/null || true
+    create_entry "$file" "$body"
   elif [[ -f $file && ! -s $file ]]; then
     # An empty entry has to get content, or the writing app will not autosave
-    # it. Unlink and create rather than truncate in place, for the same reason
-    # as above: only creating a new file is guaranteed not to write through
-    # whatever the path pointed at.
+    # it. Unlink and create rather than truncate in place: only creating a new
+    # file is guaranteed not to write through whatever the path pointed at.
     rm -f -- "$file"
-    (set -o noclobber; printf '%s' "$body" >"$file") 2>/dev/null || true
+    create_entry "$file" "$body"
   fi
 
   # Last word on it, after the race the writes above cannot lose: a link that
@@ -180,8 +296,17 @@ cmd_ensure() {
 }
 
 cmd_stats() {
-  local key="${1:-$(today_key)}" file
-  file=$(entry_path "$key") || exit 1
+  local key="${1:-$(today_key)}" dir file
+  validate_key "$key"
+  dir=$(diary_dir)
+  # Before the first entry the folder may not exist yet: nothing to read, and
+  # nothing to refuse.
+  if [[ ! -e $dir ]]; then
+    printf '0\t\n'
+    return 0
+  fi
+  dir=$(private_dir "$dir") || exit
+  file="$dir/$key.md"
   if [[ -f $file && ! -L $file ]]; then
     printf '%s\t%s\n' "$(body_words "$file")" "$(body_first_line "$file")"
   else
@@ -197,7 +322,8 @@ cmd_list() {
   if [[ -n $skip ]]; then validate_key "$skip"; fi
 
   dir=$(diary_dir)
-  [[ -d $dir ]] || return 0
+  [[ -e $dir ]] || return 0
+  dir=$(private_dir "$dir") || exit
 
   # ISO dates sort as text, so the newest entries come first with no date
   # arithmetic on this side.

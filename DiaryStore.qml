@@ -74,6 +74,16 @@ Singleton {
   // of here means a failed write is translated like everything else.
   property string error: ""
 
+  // bin/diary exits 3 when the folder is not private: another account could
+  // write to it, or to a directory on the way to it, and so could swap an
+  // entry for a symlink between the helper's checks and the editor opening
+  // it. Nothing is read or written then, and the panel says why.
+  readonly property int unsafeFolderExit: 3
+
+  function noteExit(exitCode) {
+    if (exitCode === root.unsafeFolderExit) root.error = "unsafe"
+  }
+
   readonly property string todayKey: Diary.dateKey(root.now)
   readonly property bool todayWritten: root.todayWords > 0 || root.todayExcerpt !== ""
 
@@ -122,6 +132,7 @@ Singleton {
   Process {
     id: statsProc
     environment: root.environment
+    onExited: function(exitCode) { root.noteExit(exitCode) }
     stdout: StdioCollector {
       onStreamFinished: {
         var stats = Diary.parseStats(text)
@@ -134,6 +145,7 @@ Singleton {
   Process {
     id: listProc
     environment: root.environment
+    onExited: function(exitCode) { root.noteExit(exitCode) }
     stdout: StdioCollector {
       onStreamFinished: root.entries = Diary.parseList(text, root.recentCount)
     }
@@ -191,7 +203,7 @@ Singleton {
     }
     onExited: function(exitCode) {
       if (exitCode !== 0 || root.pendingPath === "") {
-        root.error = "ensure"
+        root.error = exitCode === root.unsafeFolderExit ? "unsafe" : "ensure"
         return
       }
       root.launch(root.pendingPath)

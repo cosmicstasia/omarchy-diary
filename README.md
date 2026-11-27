@@ -145,6 +145,29 @@ Markdown.
 | `bin/diary` | The only thing that touches the disk: `path`, `folder`, `ensure`, `stats`, `list`. |
 | `i18n/` | String catalogs, following the language picked in Omarchy's setup. |
 
+### A private folder
+
+The diary folder has to be one no other account can write to. The editor
+opens an entry by its path after `bin/diary` has created and checked it, so
+anyone who could rename files in the folder could swap the entry for a
+symlink in between and have your writing saved somewhere else. `bin/diary`
+therefore checks the folder and every directory on the way to it, symlink
+targets included, before it reads or writes any entry. It refuses (and the
+panel says so) when any of them is owned by another user, or writable by
+group or others, including through a POSIX ACL. A sticky directory above the
+folder, like `/tmp`, is fine. The folder itself never is.
+
+The default `~/Documents/Diary` passes as it is. Folders the plugin creates
+are `0700`. If you point it at a shared folder, fix it with:
+
+```bash
+chmod go-w ~/path/to/diary
+```
+
+Entries are created without ever opening a file at the entry's path: a
+temporary file is filled in and then hard-linked into place, which fails
+rather than following anything that appears there in the meantime.
+
 Text from a file reaches the panel as untrusted input: excerpts are rendered
 with `Text.PlainText`, capped in length, and folded to one line; a listing line
 that does not carry a real date is dropped rather than repaired. Paths are
@@ -172,7 +195,9 @@ Runs against a temporary folder — it never reads or writes a real diary. It
 covers the folder rules (in both implementations, which are compared against
 each other), entry creation and non-destruction, the heading not being counted
 as the writer's words, calendar validation, TSV safety of excerpts, listing
-order and limits, and the JS helpers under node.
+order and limits, the private-folder checks (permissions, ACLs, sticky
+parents, symlinked folders), a symlink planted inside `ensure`'s race window,
+and the JS helpers under node.
 
 ## License
 

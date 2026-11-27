@@ -62,6 +62,7 @@ Panel {
   }
 
   readonly property string errorText: {
+    if (DiaryStore.error === "unsafe") return strings.t("panel.unsafeFolder")
     if (DiaryStore.error === "folder") return strings.t("panel.folderFailed")
     if (DiaryStore.error !== "") return strings.t("panel.openFailed")
     return ""
